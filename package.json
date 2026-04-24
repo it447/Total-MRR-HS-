@@ -1,0 +1,13 @@
+{
+  "name": "hubspot-mrr-sync",
+  "version": "1.0.0",
+  "description": "Syncs total MRR from Closed Won deals to HubSpot company records",
+  "main": "sync.js",
+  "scripts": {
+    "start": "node sync.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0"
+  }
+}
