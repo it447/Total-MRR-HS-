@@ -16,9 +16,19 @@ const HEADERS = { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'applicati
 // Find your pipeline ID: HubSpot → Settings → CRM → Deals → Pipelines,
 // then hover the pipeline name and copy the ID from the URL.
 const CLIENT_SUCCESS_PIPELINE = 'client_success'; // ← replace with your pipeline ID
-const EXCLUDED_STAGE          = 'closedlost';
+const EXCLUDED_STAGES         = ['closedlost', 'buyout']; // deal stages to ignore
 const DEAL_PROPERTY           = 'margin__price___salary_';
 const COMPANY_PROPERTY        = 'total_mrr';
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Test mode ────────────────────────────────────────────────────────────────
+// List specific company IDs to process only those companies.
+// Clear this array (leave it as []) to run against all companies.
+const TEST_COMPANY_IDS = [
+  '51643462676',
+  '30123644727',
+  '25513480478',
+];
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BATCH_SIZE      = 10;
@@ -119,7 +129,7 @@ async function fetchQualifyingDeals(companyId) {
       const qualifying = batchRes.data.results.filter(
         (d) =>
           d.properties.pipeline === CLIENT_SUCCESS_PIPELINE &&
-          d.properties.dealstage !== EXCLUDED_STAGE
+          !EXCLUDED_STAGES.includes(d.properties.dealstage)
       );
       deals.push(...qualifying);
     }
@@ -163,7 +173,10 @@ function sleep(ms) {
 
 async function main() {
   console.log(`[${new Date().toISOString()}] Starting HubSpot MRR sync`);
-  console.log(`Pipeline filter: "${CLIENT_SUCCESS_PIPELINE}"  |  Excluding stage: "${EXCLUDED_STAGE}"`);
+  console.log(`Pipeline filter: "${CLIENT_SUCCESS_PIPELINE}"  |  Excluding stages: ${EXCLUDED_STAGES.join(', ')}`);
+  if (TEST_COMPANY_IDS.length > 0) {
+    console.log(`TEST MODE — restricting to ${TEST_COMPANY_IDS.length} companies: ${TEST_COMPANY_IDS.join(', ')}`);
+  }
 
   const processed = loadProgress();
   if (processed.size > 0) {
@@ -178,8 +191,11 @@ async function main() {
     process.exit(1);
   }
 
-  const remaining = companies.filter((c) => !processed.has(c.id));
-  console.log(`${companies.length} companies total, ${remaining.length} remaining to process`);
+  const pool = TEST_COMPANY_IDS.length > 0
+    ? companies.filter((c) => TEST_COMPANY_IDS.includes(c.id))
+    : companies;
+  const remaining = pool.filter((c) => !processed.has(c.id));
+  console.log(`${companies.length} companies total, ${pool.length} in scope, ${remaining.length} remaining to process`);
 
   let updated = 0;
   let skipped = 0;
