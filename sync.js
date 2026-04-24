@@ -13,10 +13,8 @@ const BASE = 'https://api.hubapi.com';
 const HEADERS = { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' };
 
 // ─── Configure these to match your HubSpot account ───────────────────────────
-// Find your pipeline ID: HubSpot → Settings → CRM → Deals → Pipelines,
-// then hover the pipeline name and copy the ID from the URL.
-const CLIENT_SUCCESS_PIPELINE = 'client_success'; // ← replace with your pipeline ID
-const EXCLUDED_STAGES         = ['closedlost', 'buyout']; // deal stages to ignore
+const CLIENT_SUCCESS_PIPELINE = '826172857';
+const EXCLUDED_STAGES         = ['1223751309', '1271488125'];
 const DEAL_PROPERTY           = 'margin__price___salary_';
 const COMPANY_PROPERTY        = 'total_mrr';
 // ─────────────────────────────────────────────────────────────────────────────
