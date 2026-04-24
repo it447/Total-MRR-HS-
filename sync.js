@@ -30,11 +30,7 @@ const ACTIVE_DEALS_PROPERTY  = 'number_of_active_deals';
 
 // ─── Test mode ────────────────────────────────────────────────────────────────
 // Clear this array (leave it as []) to run against all companies.
-const TEST_COMPANY_IDS = [
-  '51643462676',
-  '30123644727',
-  '25513480478',
-];
+const TEST_COMPANY_IDS = [];
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BATCH_SIZE     = 10;
