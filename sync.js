@@ -12,15 +12,23 @@ if (!API_KEY) {
 const BASE = 'https://api.hubapi.com';
 const HEADERS = { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' };
 
-// ─── Configure these to match your HubSpot account ───────────────────────────
+// ─── Pipeline 1: Client Success ───────────────────────────────────────────────
+// Include all deals EXCEPT the excluded stages
 const CLIENT_SUCCESS_PIPELINE = '826172857';
-const EXCLUDED_STAGES         = ['1223751309', '1271488125'];
-const DEAL_PROPERTY           = 'margin__price___salary_';
-const COMPANY_PROPERTY        = 'total_mrr';
+const CLIENT_SUCCESS_EXCLUDED = ['1223751309', '1271488125'];
+
+// ─── Pipeline 2: MOF ─────────────────────────────────────────────────────────
+// Include ONLY deals in these specific stages
+const MOF_PIPELINE        = '12344141';
+const MOF_INCLUDED_STAGES = ['66160700', '72205400', '72362554'];
+
+// ─── Properties ───────────────────────────────────────────────────────────────
+const DEAL_PROPERTY          = 'margin__price___salary_';
+const MRR_PROPERTY           = 'total_mrr';
+const ACTIVE_DEALS_PROPERTY  = 'number_of_active_deals';
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── Test mode ────────────────────────────────────────────────────────────────
-// List specific company IDs to process only those companies.
 // Clear this array (leave it as []) to run against all companies.
 const TEST_COMPANY_IDS = [
   '51643462676',
@@ -29,10 +37,10 @@ const TEST_COMPANY_IDS = [
 ];
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BATCH_SIZE      = 10;
-const BATCH_DELAY_MS  = 500;
-const MAX_RETRIES     = 3;
-const PROGRESS_FILE   = path.join(__dirname, 'progress.json');
+const BATCH_SIZE     = 10;
+const BATCH_DELAY_MS = 500;
+const MAX_RETRIES    = 3;
+const PROGRESS_FILE  = path.join(__dirname, 'progress.json');
 
 // ── Progress helpers ──────────────────────────────────────────────────────────
 
@@ -65,6 +73,22 @@ async function withRetry(fn, label) {
       await sleep(wait);
     }
   }
+}
+
+// ── Deal filter ───────────────────────────────────────────────────────────────
+
+function isQualifyingDeal(deal) {
+  const { pipeline, dealstage } = deal.properties;
+
+  if (pipeline === CLIENT_SUCCESS_PIPELINE) {
+    return !CLIENT_SUCCESS_EXCLUDED.includes(dealstage);
+  }
+
+  if (pipeline === MOF_PIPELINE) {
+    return MOF_INCLUDED_STAGES.includes(dealstage);
+  }
+
+  return false;
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
@@ -124,12 +148,7 @@ async function fetchQualifyingDeals(companyId) {
         `batchRead(${companyId})`
       );
 
-      const qualifying = batchRes.data.results.filter(
-        (d) =>
-          d.properties.pipeline === CLIENT_SUCCESS_PIPELINE &&
-          !EXCLUDED_STAGES.includes(d.properties.dealstage)
-      );
-      deals.push(...qualifying);
+      deals.push(...batchRes.data.results.filter(isQualifyingDeal));
     }
 
     if (res.data.paging?.next?.after) {
@@ -142,11 +161,16 @@ async function fetchQualifyingDeals(companyId) {
   return deals;
 }
 
-async function updateCompanyMRR(companyId, value) {
+async function updateCompany(companyId, mrr, dealCount) {
   await withRetry(
     () => axios.patch(
       `${BASE}/crm/v3/objects/companies/${companyId}`,
-      { properties: { [COMPANY_PROPERTY]: value } },
+      {
+        properties: {
+          [MRR_PROPERTY]:          mrr,
+          [ACTIVE_DEALS_PROPERTY]: dealCount,
+        },
+      },
       { headers: HEADERS }
     ),
     `updateCompany(${companyId})`
@@ -171,7 +195,8 @@ function sleep(ms) {
 
 async function main() {
   console.log(`[${new Date().toISOString()}] Starting HubSpot MRR sync`);
-  console.log(`Pipeline filter: "${CLIENT_SUCCESS_PIPELINE}"  |  Excluding stages: ${EXCLUDED_STAGES.join(', ')}`);
+  console.log(`Client Success pipeline: ${CLIENT_SUCCESS_PIPELINE}  |  Excluded stages: ${CLIENT_SUCCESS_EXCLUDED.join(', ')}`);
+  console.log(`MOF pipeline: ${MOF_PIPELINE}  |  Included stages: ${MOF_INCLUDED_STAGES.join(', ')}`);
   if (TEST_COMPANY_IDS.length > 0) {
     console.log(`TEST MODE — restricting to ${TEST_COMPANY_IDS.length} companies: ${TEST_COMPANY_IDS.join(', ')}`);
   }
@@ -202,9 +227,9 @@ async function main() {
   const totalBatches = Math.ceil(remaining.length / BATCH_SIZE);
 
   for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
-    const batch     = remaining.slice(i, i + BATCH_SIZE);
-    const batchNum  = Math.floor(i / BATCH_SIZE) + 1;
-    const rangeEnd  = Math.min(i + BATCH_SIZE, remaining.length);
+    const batch    = remaining.slice(i, i + BATCH_SIZE);
+    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+    const rangeEnd = Math.min(i + BATCH_SIZE, remaining.length);
 
     console.log(`\nBatch ${batchNum}/${totalBatches}  (companies ${i + 1}–${rangeEnd})`);
 
@@ -220,8 +245,8 @@ async function main() {
           skipped++;
         } else {
           const total = sumDealField(deals);
-          await updateCompanyMRR(companyId, total);
-          console.log(`  [${companyName}] ${deals.length} deal(s) → ${COMPANY_PROPERTY} = ${total}`);
+          await updateCompany(companyId, total, deals.length);
+          console.log(`  [${companyName}] ${deals.length} deal(s) → ${MRR_PROPERTY} = ${total}, ${ACTIVE_DEALS_PROPERTY} = ${deals.length}`);
           updated++;
         }
 
