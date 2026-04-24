@@ -2,7 +2,6 @@ name: Sync HubSpot Total MRR
 
 on:
   schedule:
-    # Runs every 3 hours
     - cron: '0 */3 * * *'
   workflow_dispatch:
 
@@ -26,4 +25,6 @@ jobs:
       - name: Run sync script
         env:
           HUBSPOT_API_KEY: ${{ secrets.HUBSPOT_API_KEY }}
+          ASANA_API_KEY: ${{ secrets.ASANA_API_KEY }}
+          ASANA_PROJECT_ID: ${{ secrets.ASANA_PROJECT_ID }}
         run: node sync.js
