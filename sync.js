@@ -9,8 +9,15 @@ if (!API_KEY) {
   process.exit(1);
 }
 
-const BASE = 'https://api.hubapi.com';
+// ─── HubSpot ──────────────────────────────────────────────────────────────────
+const BASE    = 'https://api.hubapi.com';
 const HEADERS = { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' };
+
+// ─── Asana ────────────────────────────────────────────────────────────────────
+const ASANA_KEY        = process.env.ASANA_API_KEY;
+const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1214241148472876';
+const ASANA_BASE       = 'https://app.asana.com/api/1.0';
+const ASANA_HEADERS    = { Authorization: `Bearer ${ASANA_KEY}`, 'Content-Type': 'application/json' };
 
 // ─── Pipeline 1: Client Success ───────────────────────────────────────────────
 const CLIENT_SUCCESS_PIPELINE = '826172857';
@@ -20,10 +27,17 @@ const CLIENT_SUCCESS_EXCLUDED = ['1223751309', '1271488125'];
 const MOF_PIPELINE        = '12344141';
 const MOF_INCLUDED_STAGES = ['66160700', '72205400', '72362554'];
 
-// ─── Properties ───────────────────────────────────────────────────────────────
+// ─── HubSpot properties ───────────────────────────────────────────────────────
 const DEAL_PROPERTY         = 'margin__price___salary_';
 const MRR_PROPERTY          = 'total_mrr';
 const ACTIVE_DEALS_PROPERTY = 'number_of_active_deals';
+
+// ─── Asana field name → HubSpot property ─────────────────────────────────────
+const ASANA_FIELD_MAP = {
+  'MRR':          'total_mrr',
+  'Active Hires': 'number_of_active_deals',
+  'Pod':          'pod',
+};
 
 // ─── Active company list ──────────────────────────────────────────────────────
 const ACTIVE_LIST_ID = '5410';
@@ -32,11 +46,12 @@ const ACTIVE_LIST_ID = '5410';
 const TEST_COMPANY_IDS = [];
 
 // ─── Performance ──────────────────────────────────────────────────────────────
-// Lower concurrency keeps us under HubSpot's 100 requests/10s rate limit.
-const CONCURRENCY    = 5;
-const BATCH_DELAY_MS = 1000;
-const MAX_RETRIES    = 3;
-const PROGRESS_FILE  = path.join(__dirname, 'progress.json');
+const CONCURRENCY        = 5;
+const BATCH_DELAY_MS     = 1000;
+const ASANA_BATCH_SIZE   = 5;
+const ASANA_BATCH_DELAY  = 500;
+const MAX_RETRIES        = 3;
+const PROGRESS_FILE      = path.join(__dirname, 'progress.json');
 
 // ── Progress helpers ──────────────────────────────────────────────────────────
 
@@ -57,7 +72,6 @@ function saveProgress(processed) {
 }
 
 // ── Retry wrapper ─────────────────────────────────────────────────────────────
-// Waits longer when HubSpot returns a rate limit error specifically.
 
 async function withRetry(fn, label) {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -72,7 +86,7 @@ async function withRetry(fn, label) {
         err.response?.data?.message?.includes('secondly');
 
       const wait = isRateLimit ? 10000 : attempt * 1000;
-      console.warn(`    [${label}] attempt ${attempt} failed — retrying in ${wait / 1000}s… ${isRateLimit ? '(rate limit)' : ''}`);
+      console.warn(`    [${label}] attempt ${attempt} failed — retrying in ${wait / 1000}s…${isRateLimit ? ' (rate limit)' : ''}`);
       await sleep(wait);
     }
   }
@@ -87,7 +101,9 @@ function isQualifyingDeal(deal) {
   return false;
 }
 
-// ── API calls ─────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// HUBSPOT API CALLS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 async function fetchActiveCompanies() {
   const companies = [];
@@ -127,6 +143,30 @@ async function fetchActiveCompanies() {
   }
 
   return companies;
+}
+
+// Fetch full company details needed for Asana (after MRR sync has updated values)
+async function fetchCompanyDetails(companies) {
+  const details = [];
+  const ids = companies.map((c) => c.id);
+
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const res = await withRetry(
+      () => axios.post(
+        `${BASE}/crm/v3/objects/companies/batch/read`,
+        {
+          inputs: chunk.map((id) => ({ id })),
+          properties: ['name', 'hs_object_id', 'total_mrr', 'number_of_active_deals', 'pod'],
+        },
+        { headers: HEADERS }
+      ),
+      'fetchCompanyDetails'
+    );
+    details.push(...res.data.results);
+  }
+
+  return details;
 }
 
 async function fetchQualifyingDeals(companyId) {
@@ -188,7 +228,204 @@ async function updateCompany(companyId, mrr, dealCount) {
   );
 }
 
-// ── Process a single company ──────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASANA API CALLS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Returns a map of field name → field object (gid, type, enum_options)
+async function fetchAsanaCustomFields() {
+  const res = await withRetry(
+    () => axios.get(
+      `${ASANA_BASE}/projects/${ASANA_PROJECT_ID}`,
+      {
+        headers: ASANA_HEADERS,
+        params: {
+          opt_fields: [
+            'custom_field_settings.custom_field.gid',
+            'custom_field_settings.custom_field.name',
+            'custom_field_settings.custom_field.type',
+            'custom_field_settings.custom_field.enum_options.gid',
+            'custom_field_settings.custom_field.enum_options.name',
+          ].join(','),
+        },
+      }
+    ),
+    'fetchAsanaCustomFields'
+  );
+
+  const fieldMap = {};
+  for (const setting of res.data.data.custom_field_settings || []) {
+    const f = setting.custom_field;
+    fieldMap[f.name] = f;
+  }
+  return fieldMap;
+}
+
+// Returns a map of task name → task GID for all tasks in the project
+async function fetchAllAsanaTasks() {
+  const taskMap = {};
+  let offset;
+
+  while (true) {
+    const params = { project: ASANA_PROJECT_ID, limit: 100, opt_fields: 'gid,name' };
+    if (offset) params.offset = offset;
+
+    const res = await withRetry(
+      () => axios.get(`${ASANA_BASE}/tasks`, { headers: ASANA_HEADERS, params }),
+      'fetchAllAsanaTasks'
+    );
+
+    for (const task of res.data.data || []) {
+      taskMap[task.name] = task.gid;
+    }
+
+    if (res.data.next_page?.offset) {
+      offset = res.data.next_page.offset;
+    } else {
+      break;
+    }
+  }
+
+  return taskMap;
+}
+
+function buildAsanaCustomFields(company, asanaFields) {
+  const result = {};
+
+  for (const [fieldName, hubspotProp] of Object.entries(ASANA_FIELD_MAP)) {
+    const field = asanaFields[fieldName];
+    if (!field) {
+      console.warn(`    Asana field "${fieldName}" not found in project — skipping`);
+      continue;
+    }
+
+    const raw = company.properties[hubspotProp];
+
+    if (field.type === 'number') {
+      const num = parseFloat(raw);
+      result[field.gid] = isNaN(num) ? null : num;
+    } else if (field.type === 'enum') {
+      const match = (field.enum_options || []).find(
+        (o) => o.name.toLowerCase() === String(raw || '').toLowerCase()
+      );
+      if (match) result[field.gid] = match.gid;
+    } else {
+      result[field.gid] = raw || null;
+    }
+  }
+
+  return result;
+}
+
+async function syncCompanyToAsana(company, asanaFields, taskMap) {
+  const companyId   = company.id;
+  const companyName = company.properties?.name || companyId;
+  const taskName    = `${companyName} - ${companyId}`;
+
+  const existingEntry = Object.entries(taskMap).find(([name]) =>
+    name.endsWith(`- ${companyId}`)
+  );
+
+  const customFields = buildAsanaCustomFields(company, asanaFields);
+
+  if (existingEntry) {
+    const [, taskGid] = existingEntry;
+    await withRetry(
+      () => axios.put(
+        `${ASANA_BASE}/tasks/${taskGid}`,
+        { data: { custom_fields: customFields } },
+        { headers: ASANA_HEADERS }
+      ),
+      `updateAsanaTask(${companyId})`
+    );
+    console.log(`  [${companyName}] Asana task updated`);
+    return 'updated';
+  } else {
+    await withRetry(
+      () => axios.post(
+        `${ASANA_BASE}/tasks`,
+        {
+          data: {
+            name: taskName,
+            projects: [ASANA_PROJECT_ID],
+            custom_fields: customFields,
+          },
+        },
+        { headers: ASANA_HEADERS }
+      ),
+      `createAsanaTask(${companyId})`
+    );
+    console.log(`  [${companyName}] Asana task created`);
+    return 'created';
+  }
+}
+
+async function syncToAsana(companies) {
+  if (!ASANA_KEY) {
+    console.warn('\nASANA_API_KEY not set — skipping Asana sync');
+    return;
+  }
+
+  console.log(`\n[${new Date().toISOString()}] Starting Asana sync`);
+
+  let companyDetails, asanaFields, taskMap;
+
+  try {
+    console.log('Fetching updated company details from HubSpot…');
+    companyDetails = await fetchCompanyDetails(companies);
+
+    console.log('Fetching Asana custom field definitions…');
+    asanaFields = await fetchAsanaCustomFields();
+    console.log(`Custom fields found: ${Object.keys(asanaFields).join(', ')}`);
+
+    console.log('Fetching existing Asana tasks…');
+    taskMap = await fetchAllAsanaTasks();
+    console.log(`${Object.keys(taskMap).length} existing tasks found`);
+  } catch (err) {
+    console.error('Asana setup failed:', err.response?.data || err.message);
+    return;
+  }
+
+  let created = 0;
+  let updated = 0;
+  let errors  = 0;
+
+  const totalBatches = Math.ceil(companyDetails.length / ASANA_BATCH_SIZE);
+
+  for (let i = 0; i < companyDetails.length; i += ASANA_BATCH_SIZE) {
+    const batch    = companyDetails.slice(i, i + ASANA_BATCH_SIZE);
+    const batchNum = Math.floor(i / ASANA_BATCH_SIZE) + 1;
+    const rangeEnd = Math.min(i + ASANA_BATCH_SIZE, companyDetails.length);
+
+    console.log(`\nAsana batch ${batchNum}/${totalBatches}  (companies ${i + 1}–${rangeEnd})`);
+
+    for (const company of batch) {
+      try {
+        const result = await syncCompanyToAsana(company, asanaFields, taskMap);
+        if (result === 'created') created++;
+        else updated++;
+      } catch (err) {
+        console.error(
+          `  [${company.properties?.name || company.id}] Asana ERROR:`,
+          err.response?.data?.errors?.[0]?.message || err.message
+        );
+        errors++;
+      }
+    }
+
+    if (i + ASANA_BATCH_SIZE < companyDetails.length) {
+      await sleep(ASANA_BATCH_DELAY);
+    }
+  }
+
+  console.log(
+    `\n[${new Date().toISOString()}] Asana sync done.  Created: ${created}  Updated: ${updated}  Errors: ${errors}`
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MRR SYNC HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 async function processCompany(company, processed) {
   const companyId   = company.id;
@@ -227,13 +464,13 @@ async function processCompany(company, processed) {
   }
 }
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════════════════════
 
 async function main() {
   console.log(`[${new Date().toISOString()}] Starting HubSpot MRR sync`);
@@ -295,13 +532,16 @@ async function main() {
   }
 
   console.log(
-    `\n[${new Date().toISOString()}] Done.  Updated: ${updated}  Skipped: ${skipped}  Errors: ${errors}`
+    `\n[${new Date().toISOString()}] MRR sync done.  Updated: ${updated}  Skipped: ${skipped}  Errors: ${errors}`
   );
 
   if (errors === 0 && fs.existsSync(PROGRESS_FILE)) {
     fs.unlinkSync(PROGRESS_FILE);
     console.log('Progress file cleared.');
   }
+
+  // ── Asana sync runs after MRR sync ──────────────────────────────────────────
+  await syncToAsana(pool);
 
   if (errors > 0) process.exit(1);
 }
