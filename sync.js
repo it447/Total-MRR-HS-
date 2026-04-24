@@ -29,13 +29,14 @@ const ACTIVE_DEALS_PROPERTY = 'number_of_active_deals';
 const ACTIVE_LIST_ID = '5410';
 
 // ─── Test mode ────────────────────────────────────────────────────────────────
-// Clear this array (leave it as []) to run against all companies in the list.
 const TEST_COMPANY_IDS = [];
 
 // ─── Performance ──────────────────────────────────────────────────────────────
-const CONCURRENCY   = 20;
-const MAX_RETRIES   = 3;
-const PROGRESS_FILE = path.join(__dirname, 'progress.json');
+// Lower concurrency keeps us under HubSpot's 100 requests/10s rate limit.
+const CONCURRENCY    = 5;
+const BATCH_DELAY_MS = 1000;
+const MAX_RETRIES    = 3;
+const PROGRESS_FILE  = path.join(__dirname, 'progress.json');
 
 // ── Progress helpers ──────────────────────────────────────────────────────────
 
@@ -56,6 +57,7 @@ function saveProgress(processed) {
 }
 
 // ── Retry wrapper ─────────────────────────────────────────────────────────────
+// Waits longer when HubSpot returns a rate limit error specifically.
 
 async function withRetry(fn, label) {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -63,8 +65,14 @@ async function withRetry(fn, label) {
       return await fn();
     } catch (err) {
       if (attempt === MAX_RETRIES) throw err;
-      const wait = attempt * 1000;
-      console.warn(`    [${label}] attempt ${attempt} failed — retrying in ${wait}ms…`);
+
+      const isRateLimit =
+        err.response?.status === 429 ||
+        err.response?.data?.message?.includes('ten_secondly_rolling') ||
+        err.response?.data?.message?.includes('secondly');
+
+      const wait = isRateLimit ? 10000 : attempt * 1000;
+      console.warn(`    [${label}] attempt ${attempt} failed — retrying in ${wait / 1000}s… ${isRateLimit ? '(rate limit)' : ''}`);
       await sleep(wait);
     }
   }
@@ -80,37 +88,6 @@ function isQualifyingDeal(deal) {
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
-
-async function fetchListCompanies() {
-  const companies = [];
-  let after;
-
-  while (true) {
-    const params = { limit: 100 };
-    if (after) params.after = after;
-
-    const res = await withRetry(
-      () => axios.get(
-        `${BASE}/contacts/v1/lists/${ACTIVE_LIST_ID}/contacts/all`,
-        {
-          headers: HEADERS,
-          params: { count: 100, vidOffset: after, property: 'name' }
-        }
-      ),
-      'fetchListCompanies'
-    );
-
-    companies.push(...(res.data.companies || res.data.contacts || []));
-
-    if (res.data['has-more']) {
-      after = res.data['vid-offset'];
-    } else {
-      break;
-    }
-  }
-
-  return companies;
-}
 
 async function fetchActiveCompanies() {
   const companies = [];
@@ -227,11 +204,13 @@ async function processCompany(company, processed) {
       return { status: 'skipped' };
     }
 
-    const total = deals.reduce((sum, deal) => {
-      const raw = deal.properties[DEAL_PROPERTY];
-      const val = raw !== null && raw !== undefined && raw !== '' ? parseFloat(raw) : 0;
-      return sum + (isNaN(val) ? 0 : val);
-    }, 0);
+    const total = Math.round(
+      deals.reduce((sum, deal) => {
+        const raw = deal.properties[DEAL_PROPERTY];
+        const val = raw !== null && raw !== undefined && raw !== '' ? parseFloat(raw) : 0;
+        return sum + (isNaN(val) ? 0 : val);
+      }, 0) * 100
+    ) / 100;
 
     await updateCompany(companyId, total, deals.length);
     console.log(`  [${companyName}] ${deals.length} deal(s) → ${MRR_PROPERTY} = ${total}, ${ACTIVE_DEALS_PROPERTY} = ${deals.length}`);
@@ -308,6 +287,10 @@ async function main() {
       if (value.status === 'updated') updated++;
       else if (value.status === 'skipped') skipped++;
       else errors++;
+    }
+
+    if (i + CONCURRENCY < remaining.length) {
+      await sleep(BATCH_DELAY_MS);
     }
   }
 
