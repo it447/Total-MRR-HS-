@@ -36,7 +36,7 @@ const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1214241148472876';
 // ── Run config ────────────────────────────────────────────────────────────────
 
 // Leave empty to run all companies in the active list.
-const TEST_COMPANY_IDS = ['53958030460'];
+const TEST_COMPANY_IDS = [];
 
 const CONCURRENCY       = 5;
 const BATCH_DELAY_MS    = 1000;
