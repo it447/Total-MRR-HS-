@@ -149,7 +149,6 @@ async function fetchActiveCompanies() {
   return companies;
 }
 
-// Fetches full company details after MRR sync has updated values
 async function fetchCompanyDetails(companies) {
   const details = [];
   const ids = companies.map((c) => c.id);
@@ -181,7 +180,6 @@ async function fetchCompanyDetails(companies) {
   return details;
 }
 
-// Returns map of owner ID → email
 async function fetchHubSpotOwners() {
   const owners = {};
   let after;
@@ -239,7 +237,16 @@ async function fetchQualifyingDeals(companyId) {
         ),
         `batchRead(${companyId})`
       );
-      deals.push(...batchRes.data.results.filter(isQualifyingDeal));
+
+      const qualifying = batchRes.data.results.filter(isQualifyingDeal);
+      const rejected   = batchRes.data.results.filter((d) => !isQualifyingDeal(d));
+
+      // Debug: show exactly what the API returns for deals that don't qualify
+      rejected.forEach((d) => {
+        console.log(`    [DEBUG] deal ${d.id} rejected — pipeline: "${d.properties.pipeline}" stage: "${d.properties.dealstage}"`);
+      });
+
+      deals.push(...qualifying);
     }
 
     if (res.data.paging?.next?.after) {
@@ -283,7 +290,6 @@ async function fetchAsanaWorkspaceGid() {
   return res.data.data.workspace.gid;
 }
 
-// Returns map of email → Asana user GID
 async function fetchAsanaUsers(workspaceGid) {
   const users = {};
   let offset;
@@ -314,7 +320,6 @@ async function fetchAsanaUsers(workspaceGid) {
   return users;
 }
 
-// Returns map of field name → field object (gid, type, enum_options)
 async function fetchAsanaCustomFields() {
   const res = await withRetry(
     () => axios.get(
@@ -343,7 +348,6 @@ async function fetchAsanaCustomFields() {
   return fieldMap;
 }
 
-// Returns map of task name → task GID
 async function fetchAllAsanaTasks() {
   const taskMap = {};
   let offset;
@@ -396,7 +400,7 @@ function buildAsanaCustomFields(company, asanaFields) {
     }
   }
 
-  // HubSpot URL is computed, not a HubSpot property
+  // HubSpot URL is computed from company ID
   const urlField = asanaFields['Hubspot URL'];
   if (urlField) {
     result[urlField.gid] = `https://app.hubspot.com/contacts/${HS_PORTAL_ID}/company/${company.id}`;
@@ -431,7 +435,7 @@ async function syncCompanyToAsana(company, asanaFields, taskMap, hubspotOwners, 
       ),
       `updateAsanaTask(${companyId})`
     );
-    console.log(`  [${companyName}] Asana updated${assigneeGid ? ` → ${ownerEmail}` : ''}`);
+    console.log(`  [${companyName}] Asana updated${assigneeGid ? ` → ${ownerEmail}` : ' (no assignee match)'}`);
     return 'updated';
   } else {
     await withRetry(
@@ -442,7 +446,7 @@ async function syncCompanyToAsana(company, asanaFields, taskMap, hubspotOwners, 
       ),
       `createAsanaTask(${companyId})`
     );
-    console.log(`  [${companyName}] Asana created${assigneeGid ? ` → ${ownerEmail}` : ''}`);
+    console.log(`  [${companyName}] Asana created${assigneeGid ? ` → ${ownerEmail}` : ' (no assignee match)'}`);
     return 'created';
   }
 }
@@ -540,7 +544,7 @@ async function processCompany(company, processed) {
       }, 0) * 100
     ) / 100;
 
-    // Always write — even 0 — so no company ever has a blank value
+    // Always write even if 0 so no company ever has a blank value
     await updateCompany(companyId, total, deals.length);
 
     if (deals.length === 0) {
