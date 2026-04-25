@@ -30,6 +30,9 @@ const PROP_SALARY     = 'salary_to_pay';
 const MAX_RETRIES = 3;
 const BATCH_SIZE  = 50;
 
+// Test mode — leave empty to process all deals in the sheet
+const TEST_DEAL_IDS = ['15112278621', '15777186084', '16076238937'];
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -170,6 +173,11 @@ async function main() {
   } catch (err) {
     console.error('Failed to parse sheet:', err.message);
     process.exit(1);
+  }
+
+  if (TEST_DEAL_IDS.length > 0) {
+    records = records.filter(r => TEST_DEAL_IDS.includes(r.dealId));
+    console.log(`TEST MODE — restricting to ${TEST_DEAL_IDS.length} deals: ${TEST_DEAL_IDS.join(', ')}`);
   }
 
   console.log(`${records.length} deals found in sheet`);
