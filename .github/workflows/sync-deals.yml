@@ -5,6 +5,7 @@ on:
     # Runs every Monday at 9am UTC
     - cron: '0 9 * * 1'
   workflow_dispatch:
+    # Allows manual trigger from the Actions tab
 
 jobs:
   sync:
@@ -28,4 +29,5 @@ jobs:
           HUBSPOT_API_KEY: ${{ secrets.HUBSPOT_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          SHEET_TAB: ${{ secrets.SHEET_TAB }}
         run: node sync-deals.js
