@@ -37,7 +37,6 @@ const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1214241148472876';
 
 // ── Run config ────────────────────────────────────────────────────────────────
 
-// Leave empty to run all companies in the active list.
 const TEST_COMPANY_IDS = [];
 
 const CONCURRENCY       = 5;
@@ -146,7 +145,6 @@ async function fetchCompanyDetails(ids) {
 }
 
 async function fetchQualifyingDeals(companyId) {
-  // Use v4 associations API — returns primary AND non-primary company-deal links
   const dealIds = new Set();
   let after;
 
@@ -175,7 +173,6 @@ async function fetchQualifyingDeals(companyId) {
 
   if (dealIds.size === 0) return { qualifying: [], mofCount: 0 };
 
-  // Batch-read deal properties in chunks of 100
   const qualifying = [];
   let mofCount     = 0;
   const ids        = [...dealIds];
@@ -377,9 +374,13 @@ async function syncCompanyToAsana(company, existingTasks, customFieldDefs, owner
   const ownerEmail  = ownerEmailMap.get(ownerIdStr);
   const assigneeGid = ownerEmail ? asanaUserMap.get(ownerEmail) : undefined;
 
+  const isInactive = (parseInt(company.properties?.[ACTIVE_DEALS_PROPERTY], 10) || 0) === 0 &&
+                     (parseInt(company.properties?.[MOF_DEALS_PROPERTY], 10) || 0) === 0;
+
   const taskBody = {
     name: taskName,
     custom_fields: customFields,
+    completed: isInactive,
     ...(assigneeGid ? { assignee: assigneeGid } : {}),
   };
 
@@ -401,7 +402,7 @@ async function syncCompanyToAsana(company, existingTasks, customFieldDefs, owner
   }
 
   const action = existingGid ? 'updated' : 'created';
-  console.log(`  [${companyName}] Asana ${action}${assigneeGid ? ` → ${ownerEmail}` : ' (no assignee match)'}`);
+  console.log(`  [${companyName}] Asana ${action} — ${isInactive ? 'COMPLETED (0/0)' : 'active'}${assigneeGid ? ` → ${ownerEmail}` : ' (no assignee match)'}`);
   return action;
 }
 
@@ -432,7 +433,6 @@ async function runMRRSync(companies) {
           return sum + (isNaN(v) ? 0 : v);
         }, 0);
 
-        // Always write even if 0 so no company ever has a blank value
         await updateCompany(company.id, total, qualifying.length, mofCount);
 
         const name = company.properties?.name || company.id;
