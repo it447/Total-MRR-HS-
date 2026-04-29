@@ -144,7 +144,7 @@ async function fetchCompanyDetails(ids) {
   return companies;
 }
 
-async function fetchQualifyingDeals(companyId) {
+async function fetchQualifyingDeals(companyId, stageNameMap) {
   const dealIds = new Set();
   let after;
 
@@ -171,10 +171,11 @@ async function fetchQualifyingDeals(companyId) {
     }
   }
 
-  if (dealIds.size === 0) return { qualifying: [], mofCount: 0 };
+  if (dealIds.size === 0) return { qualifying: [], mofCount: 0, stageNames: [] };
 
   const qualifying = [];
   let mofCount     = 0;
+  const stagesSeen = new Set();
   const ids        = [...dealIds];
 
   for (let i = 0; i < ids.length; i += 100) {
@@ -197,12 +198,35 @@ async function fetchQualifyingDeals(companyId) {
       if (TEST_COMPANY_IDS.length > 0) {
         console.log(`    [deal ${d.id}] pipeline:"${d.properties.pipeline}" stage:"${d.properties.dealstage}" value:${d.properties[DEAL_PROPERTY]} → ${passes ? 'QUALIFIES' : 'rejected'}`);
       }
+      if (isMofCountDeal(d) || passes) {
+        const stageName = stageNameMap?.get(d.properties.dealstage) || d.properties.dealstage;
+        stagesSeen.add(stageName);
+      }
       if (isMofCountDeal(d)) mofCount++;
     });
     qualifying.push(...allDeals.filter(isQualifyingDeal));
   }
 
-  return { qualifying, mofCount };
+  return { qualifying, mofCount, stageNames: [...stagesSeen] };
+}
+
+async function fetchDealStageNames() {
+  const stageMap = new Map();
+
+  for (const pipelineId of [CLIENT_SUCCESS_PIPELINE, MOF_PIPELINE]) {
+    const res = await withRetry(
+      () => axios.get(
+        `${HS_BASE}/crm/v3/pipelines/deals/${pipelineId}/stages`,
+        { headers: HS_HEADERS }
+      ),
+      `fetchStages(${pipelineId})`
+    );
+    for (const stage of res.data.results || []) {
+      stageMap.set(stage.id, stage.label);
+    }
+  }
+
+  return stageMap;
 }
 
 async function updateCompany(companyId, mrr, activeDeals, mofDeals) {
@@ -353,6 +377,8 @@ function buildAsanaCustomFields(company, customFieldDefs) {
           fields[gid] = val;
         }
       }
+    } else if (fieldName === 'Deal Stages') {
+      fields[gid] = (company._stageNames || []).join(', ');
     } else if (fieldName === 'Company Domain') {
       if (props['domain']) fields[gid] = props['domain'];
     } else if (fieldName === 'Hubspot URL') {
@@ -415,6 +441,10 @@ async function runMRRSync(companies) {
   const remaining = companies.filter(c => !processed.has(c.id));
   console.log(`${companies.length} companies in scope, ${remaining.length} remaining to process`);
 
+  console.log('Fetching deal stage names from HubSpot…');
+  const stageNameMap = await fetchDealStageNames();
+  console.log(`${stageNameMap.size} deal stages loaded`);
+
   let updated = 0, skipped = 0, errors = 0;
   const totalBatches = Math.ceil(remaining.length / CONCURRENCY);
 
@@ -426,7 +456,7 @@ async function runMRRSync(companies) {
 
     const results = await Promise.allSettled(
       batch.map(async company => {
-        const { qualifying, mofCount } = await fetchQualifyingDeals(company.id);
+        const { qualifying, mofCount, stageNames } = await fetchQualifyingDeals(company.id, stageNameMap);
         const total = qualifying.reduce((sum, d) => {
           const raw = d.properties[DEAL_PROPERTY];
           const v   = (raw !== null && raw !== undefined && raw !== '') ? parseFloat(raw) : 0;
@@ -439,9 +469,9 @@ async function runMRRSync(companies) {
         if (qualifying.length === 0) {
           console.log(`  [${name} | id:${company.id}] no qualifying deals — wrote 0  MOF count = ${mofCount}`);
         } else {
-          console.log(`  [${name} | id:${company.id}] ${qualifying.length} deal(s) → ${MRR_PROPERTY} = ${total}  MOF count = ${mofCount}`);
+          console.log(`  [${name} | id:${company.id}] ${qualifying.length} deal(s) → ${MRR_PROPERTY} = ${total}  MOF count = ${mofCount}  stages: ${stageNames.join(', ')}`);
         }
-        return qualifying.length > 0;
+        return { hasDeals: qualifying.length > 0, stageNames };
       })
     );
 
@@ -449,7 +479,8 @@ async function runMRRSync(companies) {
       const res     = results[j];
       const company = batch[j];
       if (res.status === 'fulfilled') {
-        res.value ? updated++ : skipped++;
+        res.value.hasDeals ? updated++ : skipped++;
+        company._stageNames = res.value.stageNames;
         processed.add(company.id);
         saveProgress(processed);
       } else {
@@ -484,6 +515,8 @@ async function runAsanaSync(companies) {
 
   console.log('Fetching updated company details from HubSpot…');
   const freshCompanies = await fetchCompanyDetails(companies.map(c => c.id));
+  const stageNamesById = Object.fromEntries(companies.map(c => [c.id, c._stageNames || []]));
+  freshCompanies.forEach(c => { c._stageNames = stageNamesById[c.id] || []; });
 
   console.log('Fetching HubSpot owners…');
   const ownerEmailMap = await fetchHubSpotOwners();
