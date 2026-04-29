@@ -19,10 +19,12 @@ const CLIENT_SUCCESS_PIPELINE = '826172857';
 const CLIENT_SUCCESS_EXCLUDED = ['1223751309', '1271488125'];
 const MOF_PIPELINE            = '12344141';
 const MOF_INCLUDED_STAGES     = ['66160700', '72205400', '72362554'];
+const MOF_COUNT_STAGES        = ['100553797', '206636190', '266814820', '158677007', '49137444', '41905479', '50302346', '41905480', '72187285', '266767789', '266842935', '72198959', '36059460'];
 
-const DEAL_PROPERTY         = 'margin__price___salary_';
-const MRR_PROPERTY          = 'total_mrr';
-const ACTIVE_DEALS_PROPERTY = 'number_of_active_deals';
+const DEAL_PROPERTY          = 'margin__price___salary_';
+const MRR_PROPERTY           = 'total_mrr';
+const ACTIVE_DEALS_PROPERTY  = 'number_of_active_deals';
+const MOF_DEALS_PROPERTY     = 'number_of_deals_in_mof';
 
 const ACTIVE_LIST_ID = '5410';
 const HS_PORTAL_ID   = '22650739';
@@ -36,7 +38,7 @@ const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1214241148472876';
 // ── Run config ────────────────────────────────────────────────────────────────
 
 // Leave empty to run all companies in the active list.
-const TEST_COMPANY_IDS = [];
+const TEST_COMPANY_IDS = ['53958030460'];
 
 const CONCURRENCY       = 5;
 const BATCH_DELAY_MS    = 1000;
@@ -87,6 +89,10 @@ function isQualifyingDeal(d) {
   return false;
 }
 
+function isMofCountDeal(d) {
+  return d.properties.pipeline === MOF_PIPELINE && MOF_COUNT_STAGES.includes(d.properties.dealstage);
+}
+
 // ── HubSpot API ───────────────────────────────────────────────────────────────
 
 async function fetchActiveCompanyIds() {
@@ -127,7 +133,7 @@ async function fetchCompanyDetails(ids) {
         `${HS_BASE}/crm/v3/objects/companies/batch/read`,
         {
           inputs: chunk.map(id => ({ id })),
-          properties: ['name', 'hs_object_id', MRR_PROPERTY, ACTIVE_DEALS_PROPERTY, 'pod', 'domain', 'hubspot_owner_id'],
+          properties: ['name', 'hs_object_id', MRR_PROPERTY, ACTIVE_DEALS_PROPERTY, MOF_DEALS_PROPERTY, 'pod', 'domain', 'hubspot_owner_id'],
         },
         { headers: HS_HEADERS }
       ),
@@ -140,43 +146,24 @@ async function fetchCompanyDetails(ids) {
 }
 
 async function fetchQualifyingDeals(companyId) {
-  const deals = [];
+  // Use v4 associations API — returns primary AND non-primary company-deal links
+  const dealIds = new Set();
   let after;
 
   while (true) {
-    const params = { limit: 100 };
+    const params = { limit: 500 };
     if (after) params.after = after;
 
     const res = await withRetry(
       () => axios.get(
-        `${HS_BASE}/crm/v3/objects/companies/${companyId}/associations/deals`,
+        `${HS_BASE}/crm/v4/objects/companies/${companyId}/associations/deals`,
         { headers: HS_HEADERS, params }
       ),
       `associations(${companyId})`
     );
 
-    const dealIds = res.data.results.map(r => r.id);
-
-    if (dealIds.length > 0) {
-      const batchRes = await withRetry(
-        () => axios.post(
-          `${HS_BASE}/crm/v3/objects/deals/batch/read`,
-          {
-            inputs: dealIds.map(id => ({ id })),
-            properties: ['dealstage', 'pipeline', DEAL_PROPERTY],
-          },
-          { headers: HS_HEADERS }
-        ),
-        `batchRead(${companyId})`
-      );
-      const allDeals = batchRes.data.results;
-      allDeals.forEach(d => {
-        const passes = isQualifyingDeal(d);
-        if (TEST_COMPANY_IDS.length > 0) {
-          console.log(`    [deal ${d.id}] pipeline:"${d.properties.pipeline}" stage:"${d.properties.dealstage}" value:${d.properties[DEAL_PROPERTY]} → ${passes ? 'QUALIFIES' : 'rejected'}`);
-        }
-      });
-      deals.push(...allDeals.filter(isQualifyingDeal));
+    for (const r of res.data.results || []) {
+      dealIds.add(String(r.toObjectId));
     }
 
     if (res.data.paging?.next?.after) {
@@ -186,14 +173,46 @@ async function fetchQualifyingDeals(companyId) {
     }
   }
 
-  return deals;
+  if (dealIds.size === 0) return { qualifying: [], mofCount: 0 };
+
+  // Batch-read deal properties in chunks of 100
+  const qualifying = [];
+  let mofCount     = 0;
+  const ids        = [...dealIds];
+
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk    = ids.slice(i, i + 100);
+    const batchRes = await withRetry(
+      () => axios.post(
+        `${HS_BASE}/crm/v3/objects/deals/batch/read`,
+        {
+          inputs: chunk.map(id => ({ id })),
+          properties: ['dealstage', 'pipeline', DEAL_PROPERTY],
+        },
+        { headers: HS_HEADERS }
+      ),
+      `batchRead(${companyId})`
+    );
+
+    const allDeals = batchRes.data.results;
+    allDeals.forEach(d => {
+      const passes = isQualifyingDeal(d);
+      if (TEST_COMPANY_IDS.length > 0) {
+        console.log(`    [deal ${d.id}] pipeline:"${d.properties.pipeline}" stage:"${d.properties.dealstage}" value:${d.properties[DEAL_PROPERTY]} → ${passes ? 'QUALIFIES' : 'rejected'}`);
+      }
+      if (isMofCountDeal(d)) mofCount++;
+    });
+    qualifying.push(...allDeals.filter(isQualifyingDeal));
+  }
+
+  return { qualifying, mofCount };
 }
 
-async function updateCompany(companyId, mrr, activeDeals) {
+async function updateCompany(companyId, mrr, activeDeals, mofDeals) {
   await withRetry(
     () => axios.patch(
       `${HS_BASE}/crm/v3/objects/companies/${companyId}`,
-      { properties: { [MRR_PROPERTY]: mrr, [ACTIVE_DEALS_PROPERTY]: activeDeals } },
+      { properties: { [MRR_PROPERTY]: mrr, [ACTIVE_DEALS_PROPERTY]: activeDeals, [MOF_DEALS_PROPERTY]: mofDeals } },
       { headers: HS_HEADERS }
     ),
     `updateCompany(${companyId})`
@@ -324,7 +343,10 @@ function buildAsanaCustomFields(company, customFieldDefs) {
     } else if (fieldName === 'Active Hires') {
       const v = parseInt(props[ACTIVE_DEALS_PROPERTY], 10);
       fields[gid] = isNaN(v) ? 0 : v;
-    } else if (fieldName === 'Pod') {
+    } else if (fieldName === 'Number of MOF Deals') {
+      const v = parseInt(props[MOF_DEALS_PROPERTY], 10);
+      fields[gid] = isNaN(v) ? 0 : v;
+    } else if (fieldName.toLowerCase() === 'pod') {
       const val = props['pod'];
       if (val) {
         if (type === 'enum') {
@@ -403,23 +425,23 @@ async function runMRRSync(companies) {
 
     const results = await Promise.allSettled(
       batch.map(async company => {
-        const deals = await fetchQualifyingDeals(company.id);
-        const total = deals.reduce((sum, d) => {
+        const { qualifying, mofCount } = await fetchQualifyingDeals(company.id);
+        const total = qualifying.reduce((sum, d) => {
           const raw = d.properties[DEAL_PROPERTY];
           const v   = (raw !== null && raw !== undefined && raw !== '') ? parseFloat(raw) : 0;
           return sum + (isNaN(v) ? 0 : v);
         }, 0);
 
         // Always write even if 0 so no company ever has a blank value
-        await updateCompany(company.id, total, deals.length);
+        await updateCompany(company.id, total, qualifying.length, mofCount);
 
         const name = company.properties?.name || company.id;
-        if (deals.length === 0) {
-          console.log(`  [${name} | id:${company.id}] no qualifying deals — wrote 0`);
+        if (qualifying.length === 0) {
+          console.log(`  [${name} | id:${company.id}] no qualifying deals — wrote 0  MOF count = ${mofCount}`);
         } else {
-          console.log(`  [${name} | id:${company.id}] ${deals.length} deal(s) → ${MRR_PROPERTY} = ${total}`);
+          console.log(`  [${name} | id:${company.id}] ${qualifying.length} deal(s) → ${MRR_PROPERTY} = ${total}  MOF count = ${mofCount}`);
         }
-        return deals.length > 0;
+        return qualifying.length > 0;
       })
     );
 
