@@ -1,0 +1,26 @@
+name: Create Drive Subfolders (One-time)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create:
+    name: Create Agreements and Client Ops subfolders
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Create subfolders
+        env:
+          GOOGLE_DRIVE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_DRIVE_SERVICE_ACCOUNT }}
+        run: node create-subfolders.js
