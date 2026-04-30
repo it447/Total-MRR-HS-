@@ -1,12 +1,17 @@
 require('dotenv').config();
-const axios = require('axios');
-const fs    = require('fs');
-const path  = require('path');
+const axios        = require('axios');
+const fs           = require('fs');
+const path         = require('path');
+const { google }   = require('googleapis');
+
+// ── Environment ───────────────────────────────────────────────────────────────
 
 const HUBSPOT_API_KEY = process.env.HUBSPOT_API_KEY;
 const ASANA_API_KEY   = process.env.ASANA_API_KEY;
 
 if (!HUBSPOT_API_KEY) { console.error('ERROR: HUBSPOT_API_KEY is not set'); process.exit(1); }
+
+// ── HubSpot constants ─────────────────────────────────────────────────────────
 
 const HS_BASE    = 'https://api.hubapi.com';
 const HS_HEADERS = { Authorization: `Bearer ${HUBSPOT_API_KEY}`, 'Content-Type': 'application/json' };
@@ -25,10 +30,17 @@ const MOF_DEALS_PROPERTY     = 'number_of_deals_in_mof';
 const ACTIVE_LIST_ID = '5410';
 const HS_PORTAL_ID   = '22650739';
 
-const AS_BASE          = 'https://app.asana.com/api/1.0';
-const AS_HEADERS       = { Authorization: `Bearer ${ASANA_API_KEY}`, 'Content-Type': 'application/json' };
+const DRIVE_PARENT_FOLDER_ID = '1Zvl6h5QhlbcjBn3RoEamjFWqXDnjQ23Z';
+
+// ── Asana constants ───────────────────────────────────────────────────────────
+
+const AS_BASE      = 'https://app.asana.com/api/1.0';
+const AS_HEADERS   = { Authorization: `Bearer ${ASANA_API_KEY}`, 'Content-Type': 'application/json' };
 const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1214241148472876';
 
+// ── Run config ────────────────────────────────────────────────────────────────
+
+// Leave empty to run all companies in the active list.
 const TEST_COMPANY_IDS = [];
 
 const CONCURRENCY       = 5;
@@ -37,6 +49,8 @@ const ASANA_BATCH_SIZE  = 5;
 const ASANA_BATCH_DELAY = 500;
 const MAX_RETRIES       = 3;
 const PROGRESS_FILE     = path.join(__dirname, 'progress.json');
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -68,6 +82,8 @@ async function withRetry(fn, label) {
   }
 }
 
+// ── Deal filtering ────────────────────────────────────────────────────────────
+
 function isQualifyingDeal(d) {
   const pipeline = d.properties.pipeline;
   const stage    = d.properties.dealstage;
@@ -80,56 +96,89 @@ function isMofCountDeal(d) {
   return d.properties.pipeline === MOF_PIPELINE && MOF_COUNT_STAGES.includes(d.properties.dealstage);
 }
 
+// ── HubSpot API ───────────────────────────────────────────────────────────────
+
 async function fetchActiveCompanyIds() {
   const ids = [];
   let after;
+
   while (true) {
     const params = { limit: 100 };
     if (after) params.after = after;
+
     const res = await withRetry(
       () => axios.get(`${HS_BASE}/crm/v3/lists/${ACTIVE_LIST_ID}/memberships`, { headers: HS_HEADERS, params }),
       'fetchActiveCompanyIds'
     );
-    for (const m of res.data.results || []) { ids.push(m.recordId ?? m.id); }
-    if (res.data.paging?.next?.after) { after = res.data.paging.next.after; } else { break; }
+
+    for (const m of res.data.results || []) {
+      ids.push(m.recordId ?? m.id);
+    }
+
+    if (res.data.paging?.next?.after) {
+      after = res.data.paging.next.after;
+    } else {
+      break;
+    }
   }
+
   return [...new Set(ids)];
 }
 
 async function fetchCompanyDetails(ids) {
   const companies = [];
   const CHUNK = 100;
+
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
     const res = await withRetry(
       () => axios.post(
         `${HS_BASE}/crm/v3/objects/companies/batch/read`,
-        { inputs: chunk.map(id => ({ id })), properties: ['name', 'hs_object_id', MRR_PROPERTY, ACTIVE_DEALS_PROPERTY, MOF_DEALS_PROPERTY, 'pod', 'domain', 'hubspot_owner_id'] },
+        {
+          inputs: chunk.map(id => ({ id })),
+          properties: ['name', 'hs_object_id', MRR_PROPERTY, ACTIVE_DEALS_PROPERTY, MOF_DEALS_PROPERTY, 'pod', 'domain', 'hubspot_owner_id'],
+        },
         { headers: HS_HEADERS }
       ),
       'fetchCompanyDetails'
     );
     companies.push(...res.data.results);
   }
+
   return companies;
 }
 
 async function fetchQualifyingDeals(companyId, stageNameMap) {
+  // Use v4 associations API — returns primary AND non-primary company-deal links
   const dealIds = new Set();
   let after;
+
   while (true) {
     const params = { limit: 500 };
     if (after) params.after = after;
+
     const res = await withRetry(
-      () => axios.get(`${HS_BASE}/crm/v4/objects/companies/${companyId}/associations/deals`, { headers: HS_HEADERS, params }),
+      () => axios.get(
+        `${HS_BASE}/crm/v4/objects/companies/${companyId}/associations/deals`,
+        { headers: HS_HEADERS, params }
+      ),
       `associations(${companyId})`
     );
-    for (const r of res.data.results || []) { dealIds.add(String(r.toObjectId)); }
-    if (res.data.paging?.next?.after) { after = res.data.paging.next.after; } else { break; }
+
+    for (const r of res.data.results || []) {
+      dealIds.add(String(r.toObjectId));
+    }
+
+    if (res.data.paging?.next?.after) {
+      after = res.data.paging.next.after;
+    } else {
+      break;
+    }
   }
 
   if (dealIds.size === 0) return { qualifying: [], mofCount: 0, stageNames: [] };
 
+  // Batch-read deal properties in chunks of 100
   const qualifying = [];
   let mofCount     = 0;
   const stagesSeen = new Set();
@@ -140,11 +189,15 @@ async function fetchQualifyingDeals(companyId, stageNameMap) {
     const batchRes = await withRetry(
       () => axios.post(
         `${HS_BASE}/crm/v3/objects/deals/batch/read`,
-        { inputs: chunk.map(id => ({ id })), properties: ['dealstage', 'pipeline', DEAL_PROPERTY] },
+        {
+          inputs: chunk.map(id => ({ id })),
+          properties: ['dealstage', 'pipeline', DEAL_PROPERTY],
+        },
         { headers: HS_HEADERS }
       ),
       `batchRead(${companyId})`
     );
+
     const allDeals = batchRes.data.results;
     allDeals.forEach(d => {
       const passes = isQualifyingDeal(d);
@@ -165,13 +218,20 @@ async function fetchQualifyingDeals(companyId, stageNameMap) {
 
 async function fetchDealStageNames() {
   const stageMap = new Map();
+
   for (const pipelineId of [CLIENT_SUCCESS_PIPELINE, MOF_PIPELINE]) {
     const res = await withRetry(
-      () => axios.get(`${HS_BASE}/crm/v3/pipelines/deals/${pipelineId}/stages`, { headers: HS_HEADERS }),
+      () => axios.get(
+        `${HS_BASE}/crm/v3/pipelines/deals/${pipelineId}/stages`,
+        { headers: HS_HEADERS }
+      ),
       `fetchStages(${pipelineId})`
     );
-    for (const stage of res.data.results || []) { stageMap.set(stage.id, stage.label); }
+    for (const stage of res.data.results || []) {
+      stageMap.set(stage.id, stage.label);
+    }
   }
+
   return stageMap;
 }
 
@@ -186,40 +246,126 @@ async function updateCompany(companyId, mrr, activeDeals, mofDeals) {
   );
 }
 
+// ── Google Drive ──────────────────────────────────────────────────────────────
+
+async function getDriveClient() {
+  const credentials = JSON.parse(process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT);
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/drive'],
+  });
+  return google.drive({ version: 'v3', auth });
+}
+
+async function getOrCreateDriveFolder(drive, folderName) {
+  const safeName = folderName.replace(/'/g, "\\'");
+  const res = await withRetry(
+    () => drive.files.list({
+      q: `name='${safeName}' and '${DRIVE_PARENT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id,webViewLink)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    }),
+    `findFolder(${folderName})`
+  );
+
+  if (res.data.files.length > 0) {
+    return res.data.files[0].webViewLink;
+  }
+
+  const folder = await withRetry(
+    () => drive.files.create({
+      requestBody: {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [DRIVE_PARENT_FOLDER_ID],
+      },
+      fields: 'id,webViewLink',
+      supportsAllDrives: true,
+    }),
+    `createFolder(${folderName})`
+  );
+
+  return folder.data.webViewLink;
+}
+
 async function fetchHubSpotOwners() {
   const owners = new Map();
   let after;
+
   while (true) {
     const params = { limit: 100 };
     if (after) params.after = after;
+
     const res = await withRetry(
       () => axios.get(`${HS_BASE}/crm/v3/owners`, { headers: HS_HEADERS, params }),
       'fetchOwners'
     );
-    for (const o of res.data.results || []) { if (o.email) owners.set(String(o.id), o.email.toLowerCase()); }
-    if (res.data.paging?.next?.after) { after = res.data.paging.next.after; } else { break; }
+
+    for (const o of res.data.results || []) {
+      if (o.email) owners.set(String(o.id), o.email.toLowerCase());
+    }
+
+    if (res.data.paging?.next?.after) {
+      after = res.data.paging.next.after;
+    } else {
+      break;
+    }
   }
+
   return owners;
 }
 
+// ── Asana API ─────────────────────────────────────────────────────────────────
+
+async function attachDriveFolderToTask(taskGid, folderUrl, folderName) {
+  const existing = await withRetry(
+    () => axios.get(`${AS_BASE}/attachments`, { headers: AS_HEADERS, params: { parent: taskGid, opt_fields: 'gid,name,external.url' } }),
+    `fetchAttachments(${taskGid})`
+  );
+  const already = (existing.data.data || []).some(a => a.name === folderName || (a.external?.url || '').includes('drive.google.com'));
+  if (already) return;
+
+  await withRetry(
+    () => axios.post(`${AS_BASE}/attachments`, {
+      data: { resource_subtype: 'external', parent: taskGid, name: folderName, url: folderUrl }
+    }, { headers: AS_HEADERS }),
+    `attachDrive(${taskGid})`
+  );
+}
+
 async function fetchAsanaWorkspaceGid() {
-  const res = await withRetry(() => axios.get(`${AS_BASE}/workspaces`, { headers: AS_HEADERS }), 'fetchWorkspace');
+  const res = await withRetry(
+    () => axios.get(`${AS_BASE}/workspaces`, { headers: AS_HEADERS }),
+    'fetchWorkspace'
+  );
   return res.data.data[0]?.gid;
 }
 
 async function fetchAsanaUsers(workspaceGid) {
   const users = new Map();
   let offset;
+
   while (true) {
     const params = { opt_fields: 'gid,email', limit: 100 };
     if (offset) params.offset = offset;
+
     const res = await withRetry(
       () => axios.get(`${AS_BASE}/workspaces/${workspaceGid}/users`, { headers: AS_HEADERS, params }),
       'fetchAsanaUsers'
     );
-    for (const u of res.data.data || []) { if (u.email) users.set(u.email.toLowerCase(), u.gid); }
-    if (res.data.next_page?.offset) { offset = res.data.next_page.offset; } else { break; }
+
+    for (const u of res.data.data || []) {
+      if (u.email) users.set(u.email.toLowerCase(), u.gid);
+    }
+
+    if (res.data.next_page?.offset) {
+      offset = res.data.next_page.offset;
+    } else {
+      break;
+    }
   }
+
   return users;
 }
 
@@ -227,10 +373,14 @@ async function fetchAsanaCustomFields(projectGid) {
   const res = await withRetry(
     () => axios.get(
       `${AS_BASE}/projects/${projectGid}/custom_field_settings`,
-      { headers: AS_HEADERS, params: { opt_fields: 'custom_field.gid,custom_field.name,custom_field.resource_subtype,custom_field.enum_options' } }
+      {
+        headers: AS_HEADERS,
+        params: { opt_fields: 'custom_field.gid,custom_field.name,custom_field.resource_subtype,custom_field.enum_options' },
+      }
     ),
     'fetchCustomFields'
   );
+
   const fields = {};
   for (const s of res.data.data || []) {
     const cf = s.custom_field;
@@ -242,16 +392,27 @@ async function fetchAsanaCustomFields(projectGid) {
 async function fetchAllAsanaTasks(projectGid) {
   const tasks = new Map();
   let offset;
+
   while (true) {
     const params = { project: projectGid, opt_fields: 'gid,name', limit: 100 };
     if (offset) params.offset = offset;
+
     const res = await withRetry(
       () => axios.get(`${AS_BASE}/tasks`, { headers: AS_HEADERS, params }),
       'fetchAsanaTasks'
     );
-    for (const t of res.data.data || []) { tasks.set(t.name, t.gid); }
-    if (res.data.next_page?.offset) { offset = res.data.next_page.offset; } else { break; }
+
+    for (const t of res.data.data || []) {
+      tasks.set(t.name, t.gid);
+    }
+
+    if (res.data.next_page?.offset) {
+      offset = res.data.next_page.offset;
+    } else {
+      break;
+    }
   }
+
   return tasks;
 }
 
@@ -293,11 +454,13 @@ function buildAsanaCustomFields(company, customFieldDefs) {
   return fields;
 }
 
-async function syncCompanyToAsana(company, existingTasks, customFieldDefs, ownerEmailMap, asanaUserMap, projectGid) {
+async function syncCompanyToAsana(company, existingTasks, customFieldDefs, ownerEmailMap, asanaUserMap, projectGid, drive) {
   const companyId   = company.id;
   const companyName = company.properties?.name || companyId;
   const taskName    = `${companyName} - ${companyId}`;
+
   const customFields = buildAsanaCustomFields(company, customFieldDefs);
+
   const ownerIdStr  = String(company.properties?.hubspot_owner_id || '');
   const ownerEmail  = ownerEmailMap.get(ownerIdStr);
   const assigneeGid = ownerEmail ? asanaUserMap.get(ownerEmail) : undefined;
@@ -317,22 +480,37 @@ async function syncCompanyToAsana(company, existingTasks, customFieldDefs, owner
     if (name.endsWith(`- ${companyId}`)) { existingGid = gid; break; }
   }
 
+  let finalGid = existingGid;
   if (existingGid) {
     await withRetry(
       () => axios.put(`${AS_BASE}/tasks/${existingGid}`, { data: taskBody }, { headers: AS_HEADERS }),
       `updateTask(${companyId})`
     );
   } else {
-    await withRetry(
+    const created = await withRetry(
       () => axios.post(`${AS_BASE}/tasks`, { data: { ...taskBody, projects: [projectGid] } }, { headers: AS_HEADERS }),
       `createTask(${companyId})`
     );
+    finalGid = created.data.data.gid;
   }
 
   const action = existingGid ? 'updated' : 'created';
+
+  if (drive && finalGid) {
+    const folderName = `${companyName} - ${companyId}`;
+    try {
+      const folderUrl = await getOrCreateDriveFolder(drive, folderName);
+      await attachDriveFolderToTask(finalGid, folderUrl, folderName);
+    } catch (err) {
+      console.warn(`  [${companyName}] Drive folder warning: ${err.message}`);
+    }
+  }
+
   console.log(`  [${companyName}] Asana ${action} — ${isInactive ? 'COMPLETED (0/0)' : 'active'}${assigneeGid ? ` → ${ownerEmail}` : ' (no assignee match)'}`);
   return action;
 }
+
+// ── MRR sync ──────────────────────────────────────────────────────────────────
 
 async function runMRRSync(companies) {
   const processed = loadProgress();
@@ -363,6 +541,7 @@ async function runMRRSync(companies) {
           return sum + (isNaN(v) ? 0 : v);
         }, 0);
 
+        // Always write even if 0 so no company ever has a blank value
         await updateCompany(company.id, total, qualifying.length, mofCount);
 
         const name = company.properties?.name || company.id;
@@ -403,6 +582,8 @@ async function runMRRSync(companies) {
   return errors;
 }
 
+// ── Asana sync ────────────────────────────────────────────────────────────────
+
 async function runAsanaSync(companies) {
   if (!ASANA_API_KEY) {
     console.log('ASANA_API_KEY not set — skipping Asana sync');
@@ -410,6 +591,18 @@ async function runAsanaSync(companies) {
   }
 
   console.log(`\n[${new Date().toISOString()}] Starting Asana sync`);
+
+  let drive = null;
+  if (process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT) {
+    try {
+      drive = await getDriveClient();
+      console.log('Google Drive client initialised');
+    } catch (err) {
+      console.warn('Could not initialise Drive client — skipping folder creation:', err.message);
+    }
+  } else {
+    console.log('GOOGLE_DRIVE_SERVICE_ACCOUNT not set — skipping Drive folder creation');
+  }
 
   console.log('Fetching updated company details from HubSpot…');
   const freshCompanies = await fetchCompanyDetails(companies.map(c => c.id));
@@ -447,7 +640,7 @@ async function runAsanaSync(companies) {
     for (const company of batch) {
       try {
         const action = await syncCompanyToAsana(
-          company, existingTasks, customFieldDefs, ownerEmailMap, asanaUserMap, ASANA_PROJECT_ID
+          company, existingTasks, customFieldDefs, ownerEmailMap, asanaUserMap, ASANA_PROJECT_ID, drive
         );
         action === 'created' ? created++ : asanaUpdated++;
       } catch (err) {
@@ -463,6 +656,8 @@ async function runAsanaSync(companies) {
   console.log(`\n[${new Date().toISOString()}] Asana sync done.  Created: ${created}  Updated: ${asanaUpdated}  Errors: ${errors}`);
   return errors;
 }
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log(`[${new Date().toISOString()}] Starting HubSpot MRR sync`);
