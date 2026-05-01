@@ -36,7 +36,8 @@ const DRIVE_PARENT_FOLDER_ID = '1Zvl6h5QhlbcjBn3RoEamjFWqXDnjQ23Z';
 
 const AS_BASE      = 'https://app.asana.com/api/1.0';
 const AS_HEADERS   = { Authorization: `Bearer ${ASANA_API_KEY}`, 'Content-Type': 'application/json' };
-const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1214241148472876';
+const ASANA_PROJECT_ID  = process.env.ASANA_PROJECT_ID || '1214241148472876';
+const TICKETS_PROJECT_ID = '1214392758833108';
 
 // ── Run config ────────────────────────────────────────────────────────────────
 
@@ -444,6 +445,8 @@ function buildAsanaCustomFields(company, customFieldDefs) {
       }
     } else if (fieldName === 'Deal Stages') {
       fields[gid] = (company._stageNames || []).join(', ');
+    } else if (fieldName === 'Open Tickets') {
+      fields[gid] = company._openTicketCount || 0;
     } else if (fieldName === 'Company Domain') {
       if (props['domain']) fields[gid] = props['domain'];
     } else if (fieldName === 'Hubspot URL') {
@@ -452,6 +455,51 @@ function buildAsanaCustomFields(company, customFieldDefs) {
   }
 
   return fields;
+}
+
+async function fetchOpenTicketCounts() {
+  const counts = new Map();
+  let offset;
+
+  while (true) {
+    const params = {
+      project: TICKETS_PROJECT_ID,
+      opt_fields: 'gid,custom_fields.name,custom_fields.display_value,custom_fields.enum_value',
+      limit: 100,
+    };
+    if (offset) params.offset = offset;
+
+    const res = await withRetry(
+      () => axios.get(`${AS_BASE}/tasks`, { headers: AS_HEADERS, params }),
+      'fetchTicketTasks'
+    );
+
+    for (const task of res.data.data || []) {
+      const cfs             = task.custom_fields || [];
+      const clientNameField = cfs.find(cf => cf.name === 'Client Name');
+      const statusField     = cfs.find(cf => cf.name === 'Status');
+
+      const clientNameValue = clientNameField?.display_value || '';
+      const statusValue     = statusField?.enum_value?.name  || '';
+
+      if (statusValue === 'Resolved') continue;
+
+      // Extract HubSpot company ID from "Company Name - {ID}"
+      const match = clientNameValue.match(/-\s*(\d+)\s*$/);
+      if (!match) continue;
+
+      const companyId = match[1];
+      counts.set(companyId, (counts.get(companyId) || 0) + 1);
+    }
+
+    if (res.data.next_page?.offset) {
+      offset = res.data.next_page.offset;
+    } else {
+      break;
+    }
+  }
+
+  return counts;
 }
 
 async function syncCompanyToAsana(company, existingTasks, customFieldDefs, ownerEmailMap, asanaUserMap, projectGid, drive) {
@@ -604,10 +652,17 @@ async function runAsanaSync(companies) {
     console.log('GOOGLE_DRIVE_SERVICE_ACCOUNT not set — skipping Drive folder creation');
   }
 
+  console.log('Fetching open ticket counts from Asana tickets board…');
+  const openTicketCounts = await fetchOpenTicketCounts();
+  console.log(`Open ticket data loaded for ${openTicketCounts.size} companies`);
+
   console.log('Fetching updated company details from HubSpot…');
   const freshCompanies = await fetchCompanyDetails(companies.map(c => c.id));
   const stageNamesById = Object.fromEntries(companies.map(c => [c.id, c._stageNames || []]));
-  freshCompanies.forEach(c => { c._stageNames = stageNamesById[c.id] || []; });
+  freshCompanies.forEach(c => {
+    c._stageNames      = stageNamesById[c.id] || [];
+    c._openTicketCount = openTicketCounts.get(String(c.id)) || 0;
+  });
 
   console.log('Fetching HubSpot owners…');
   const ownerEmailMap = await fetchHubSpotOwners();
