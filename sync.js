@@ -36,7 +36,7 @@ const DRIVE_PARENT_FOLDER_ID = '1Zvl6h5QhlbcjBn3RoEamjFWqXDnjQ23Z';
 
 const AS_BASE      = 'https://app.asana.com/api/1.0';
 const AS_HEADERS   = { Authorization: `Bearer ${ASANA_API_KEY}`, 'Content-Type': 'application/json' };
-const ASANA_PROJECT_ID  = process.env.ASANA_PROJECT_ID || '1214241148472876';
+const ASANA_PROJECT_ID   = process.env.ASANA_PROJECT_ID || '1214241148472876';
 const TICKETS_PROJECT_ID = '1214392758833108';
 
 // ── Run config ────────────────────────────────────────────────────────────────
@@ -445,6 +445,14 @@ function buildAsanaCustomFields(company, customFieldDefs) {
       }
     } else if (fieldName === 'Deal Stages') {
       fields[gid] = (company._stageNames || []).join(', ');
+    } else if (fieldName.toLowerCase() === 'deal status') {
+      const activeHires    = parseInt(props[ACTIVE_DEALS_PROPERTY], 10) || 0;
+      const activeSearches = parseInt(props[MOF_DEALS_PROPERTY], 10)    || 0;
+      const statusName = activeHires >= 1 ? 'Active Client'
+                       : activeSearches >= 1 ? 'Active Search'
+                       : 'Lost';
+      const opt = enumOptions.find(o => o.name === statusName);
+      if (opt) fields[gid] = opt.gid;
     } else if (fieldName === 'Open Tickets') {
       fields[gid] = company._openTicketCount || 0;
     } else if (fieldName === 'Company Domain') {
