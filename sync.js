@@ -27,7 +27,6 @@ const MRR_PROPERTY           = 'total_mrr';
 const ACTIVE_DEALS_PROPERTY  = 'number_of_active_deals';
 const MOF_DEALS_PROPERTY     = 'number_of_deals_in_mof';
 
-const ACTIVE_LIST_ID = '5410';
 const HS_PORTAL_ID   = '22650739';
 
 const DRIVE_PARENT_FOLDER_ID = '1Zvl6h5QhlbcjBn3RoEamjFWqXDnjQ23Z';
@@ -36,12 +35,11 @@ const DRIVE_PARENT_FOLDER_ID = '1Zvl6h5QhlbcjBn3RoEamjFWqXDnjQ23Z';
 
 const AS_BASE      = 'https://app.asana.com/api/1.0';
 const AS_HEADERS   = { Authorization: `Bearer ${ASANA_API_KEY}`, 'Content-Type': 'application/json' };
-const ASANA_PROJECT_ID   = process.env.ASANA_PROJECT_ID || '1214241148472876';
+const ASANA_PROJECT_ID  = process.env.ASANA_PROJECT_ID || '1214241148472876';
 const TICKETS_PROJECT_ID = '1214392758833108';
 
 // ── Run config ────────────────────────────────────────────────────────────────
 
-// Leave empty to run all companies in the active list.
 const TEST_COMPANY_IDS = [];
 
 const CONCURRENCY       = 5;
@@ -100,30 +98,69 @@ function isMofCountDeal(d) {
 // ── HubSpot API ───────────────────────────────────────────────────────────────
 
 async function fetchActiveCompanyIds() {
-  const ids = [];
-  let after;
+  const companyIds = new Set();
 
-  while (true) {
-    const params = { limit: 100 };
-    if (after) params.after = after;
+  const allMofStages = [...new Set([...MOF_INCLUDED_STAGES, ...MOF_COUNT_STAGES])];
 
-    const res = await withRetry(
-      () => axios.get(`${HS_BASE}/crm/v3/lists/${ACTIVE_LIST_ID}/memberships`, { headers: HS_HEADERS, params }),
-      'fetchActiveCompanyIds'
-    );
+  const searchBodies = [
+    {
+      filterGroups: [{
+        filters: [
+          { propertyName: 'pipeline', operator: 'EQ', value: CLIENT_SUCCESS_PIPELINE },
+          { propertyName: 'dealstage', operator: 'NOT_IN', values: CLIENT_SUCCESS_EXCLUDED },
+        ],
+      }],
+      properties: ['hs_object_id'],
+      limit: 100,
+    },
+    {
+      filterGroups: [{
+        filters: [
+          { propertyName: 'pipeline', operator: 'EQ', value: MOF_PIPELINE },
+          { propertyName: 'dealstage', operator: 'IN', values: allMofStages },
+        ],
+      }],
+      properties: ['hs_object_id'],
+      limit: 100,
+    },
+  ];
 
-    for (const m of res.data.results || []) {
-      ids.push(m.recordId ?? m.id);
-    }
+  for (const baseBody of searchBodies) {
+    let after;
+    while (true) {
+      const body = { ...baseBody, ...(after ? { after } : {}) };
+      const res = await withRetry(
+        () => axios.post(`${HS_BASE}/crm/v3/objects/deals/search`, body, { headers: HS_HEADERS }),
+        'searchDeals'
+      );
 
-    if (res.data.paging?.next?.after) {
-      after = res.data.paging.next.after;
-    } else {
-      break;
+      const dealIds = (res.data.results || []).map(d => d.id);
+
+      if (dealIds.length > 0) {
+        const assocRes = await withRetry(
+          () => axios.post(
+            `${HS_BASE}/crm/v4/associations/deals/companies/batch/read`,
+            { inputs: dealIds.map(id => ({ id })) },
+            { headers: HS_HEADERS }
+          ),
+          'fetchDealCompanyAssoc'
+        );
+        for (const result of assocRes.data.results || []) {
+          for (const assoc of result.to || []) {
+            companyIds.add(String(assoc.toObjectId));
+          }
+        }
+      }
+
+      if (res.data.paging?.next?.after) {
+        after = res.data.paging.next.after;
+      } else {
+        break;
+      }
     }
   }
 
-  return [...new Set(ids)];
+  return [...companyIds];
 }
 
 async function fetchCompanyDetails(ids) {
@@ -150,7 +187,6 @@ async function fetchCompanyDetails(ids) {
 }
 
 async function fetchQualifyingDeals(companyId, stageNameMap) {
-  // Use v4 associations API — returns primary AND non-primary company-deal links
   const dealIds = new Set();
   let after;
 
@@ -179,7 +215,6 @@ async function fetchQualifyingDeals(companyId, stageNameMap) {
 
   if (dealIds.size === 0) return { qualifying: [], mofCount: 0, stageNames: [] };
 
-  // Batch-read deal properties in chunks of 100
   const qualifying = [];
   let mofCount     = 0;
   const stagesSeen = new Set();
@@ -492,7 +527,6 @@ async function fetchOpenTicketCounts() {
 
       if (statusValue === 'Resolved') continue;
 
-      // Extract HubSpot company ID from "Company Name - {ID}"
       const match = clientNameValue.match(/-\s*(\d+)\s*$/);
       if (!match) continue;
 
@@ -597,7 +631,6 @@ async function runMRRSync(companies) {
           return sum + (isNaN(v) ? 0 : v);
         }, 0);
 
-        // Always write even if 0 so no company ever has a blank value
         await updateCompany(company.id, total, qualifying.length, mofCount);
 
         const name = company.properties?.name || company.id;
@@ -668,8 +701,8 @@ async function runAsanaSync(companies) {
   const freshCompanies = await fetchCompanyDetails(companies.map(c => c.id));
   const stageNamesById = Object.fromEntries(companies.map(c => [c.id, c._stageNames || []]));
   freshCompanies.forEach(c => {
-    c._stageNames      = stageNamesById[c.id] || [];
-    c._openTicketCount = openTicketCounts.get(String(c.id)) || 0;
+    c._stageNames       = stageNamesById[c.id] || [];
+    c._openTicketCount  = openTicketCounts.get(String(c.id)) || 0;
   });
 
   console.log('Fetching HubSpot owners…');
@@ -724,7 +757,6 @@ async function runAsanaSync(companies) {
 
 async function main() {
   console.log(`[${new Date().toISOString()}] Starting HubSpot MRR sync`);
-  console.log(`Active list ID: ${ACTIVE_LIST_ID}`);
   console.log(`Client Success pipeline: ${CLIENT_SUCCESS_PIPELINE}  |  Excluded stages: ${CLIENT_SUCCESS_EXCLUDED.join(', ')}`);
   console.log(`MOF pipeline: ${MOF_PIPELINE}  |  Included stages: ${MOF_INCLUDED_STAGES.join(', ')}`);
   console.log(`Concurrency: ${CONCURRENCY} companies at a time`);
