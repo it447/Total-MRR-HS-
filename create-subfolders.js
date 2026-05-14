@@ -45,7 +45,7 @@ async function getAllCompanyFolders(drive) {
 
 async function getSubfolderId(drive, parentId, name) {
   const res = await drive.files.list({
-    q: `name='${name}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    q: `name='${name.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
     fields: 'files(id)',
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
@@ -55,7 +55,7 @@ async function getSubfolderId(drive, parentId, name) {
 
 async function ensureSubfolder(drive, parentId, subfolderName) {
   const res = await drive.files.list({
-    q: `name='${subfolderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    q: `name='${subfolderName.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
     fields: 'files(id)',
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
@@ -82,7 +82,7 @@ function buildKocTemplate(companyName) {
 
 async function ensureKocDoc(drive, docs, parentId, docName, companyName) {
   const res = await drive.files.list({
-    q: `name='${docName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false`,
+    q: `name='${docName.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false`,
     fields: 'files(id)',
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
@@ -184,7 +184,7 @@ async function main() {
           const kocDocName = `${companyName} - KOC - [Position]`;
           try {
             const kocStatus = await ensureKocDoc(drive, docs, clientOpsFolderId, kocDocName, companyName);
-            if (kocStatus === 'created')   { console.log(`  [${folder.name}] created doc "${kocDocName}"`);   created++; }
+            if (kocStatus === 'created')        { console.log(`  [${folder.name}] created doc "${kocDocName}"`);   created++; }
             else if (kocStatus === 'populated') { console.log(`  [${folder.name}] populated doc "${kocDocName}"`); created++; }
             else { skipped++; }
           } catch (err) {
