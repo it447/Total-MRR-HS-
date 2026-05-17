@@ -2,6 +2,8 @@ name: Create Drive Subfolders (One-time)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
 
 jobs:
   create:
