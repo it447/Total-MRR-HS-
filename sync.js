@@ -40,6 +40,7 @@ const TICKETS_PROJECT_ID = '1214392758833108';
 
 // ── Run config ────────────────────────────────────────────────────────────────
 
+// Leave empty to run all companies in the active list.
 const TEST_COMPANY_IDS = [];
 
 const CONCURRENCY       = 5;
@@ -100,6 +101,7 @@ function isMofCountDeal(d) {
 async function fetchActiveCompanyIds() {
   const companyIds = new Set();
 
+  // All stage IDs that qualify a company for syncing across both pipelines
   const allMofStages = [...new Set([...MOF_INCLUDED_STAGES, ...MOF_COUNT_STAGES])];
 
   const searchBodies = [
@@ -187,6 +189,7 @@ async function fetchCompanyDetails(ids) {
 }
 
 async function fetchQualifyingDeals(companyId, stageNameMap) {
+  // Use v4 associations API — returns primary AND non-primary company-deal links
   const dealIds = new Set();
   let after;
 
@@ -215,6 +218,7 @@ async function fetchQualifyingDeals(companyId, stageNameMap) {
 
   if (dealIds.size === 0) return { qualifying: [], mofCount: 0, stageNames: [] };
 
+  // Batch-read deal properties in chunks of 100
   const qualifying = [];
   let mofCount     = 0;
   const stagesSeen = new Set();
@@ -518,7 +522,7 @@ async function fetchOpenTicketCounts() {
     );
 
     for (const task of res.data.data || []) {
-      const cfs             = task.custom_fields || [];
+      const cfs            = task.custom_fields || [];
       const clientNameField = cfs.find(cf => cf.name === 'Client Name');
       const statusField     = cfs.find(cf => cf.name === 'Status');
 
@@ -527,6 +531,7 @@ async function fetchOpenTicketCounts() {
 
       if (statusValue === 'Resolved') continue;
 
+      // Extract HubSpot company ID from "Company Name - {ID}"
       const match = clientNameValue.match(/-\s*(\d+)\s*$/);
       if (!match) continue;
 
@@ -562,7 +567,7 @@ async function syncCompanyToAsana(company, existingTasks, customFieldDefs, owner
     name: taskName,
     custom_fields: customFields,
     completed: isInactive,
-    ...(assigneeGid ? { assignee: assigneeGid } : {}),
+    assignee: assigneeGid || null,
   };
 
   let existingGid;
@@ -631,6 +636,7 @@ async function runMRRSync(companies) {
           return sum + (isNaN(v) ? 0 : v);
         }, 0);
 
+        // Always write even if 0 so no company ever has a blank value
         await updateCompany(company.id, total, qualifying.length, mofCount);
 
         const name = company.properties?.name || company.id;
