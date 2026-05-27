@@ -80,7 +80,11 @@ function buildKocTemplate(companyName) {
   return '☎️ Kick-Off Call – ' + companyName + ' - [ROLE NAME]\n\nGoal:\nAlign on the role requirements, candidate profile, and hiring expectations to ensure we launch the search effectively.\nAttendees:\nClient:\nRole:\nClient Owner:\nAE:\n\nCall Structure (15–20 minutes)\nIntroduction\nClient Owner: I will be your Account Manager and I will be leading search & delivery as well as your main POC post-hire (onboarding and support)\n\nFlexible Structure for the Call\n\n1. Confirm Working Hours & Budget\nQ: What are the expected working hours / time zone?\nQ: The budget discussed was [X or X–X] — does that still align?\nQ: Are you open to flexibility for a strong candidate?\n\n2. Scope the Role (JD Deep Dive)\n(This is the most important section—go beyond the written JD)\nQ: Can you walk me through what this person will actually do in a typical day/week?\nQ: What are the top 3–5 priorities for this role?\nQ: What tasks or responsibilities are non-negotiable?\nQ: What could be flexible or learned on the job?\nQ: What tools, systems, or workflows will they be working with daily?\nQ: What level of ownership do you expect (execution vs strategy vs both)?\nQ: What type of background tends to work best for this role? (industry, company type, etc.)\nQ: Are there any profiles you\'ve tried before that didn\'t work? Why?\n👉 AM note: Clarify vague JDs here. If something sounds broad, narrow it down.\n\n3. Candidate Profile & Decision Criteria\nQ: What are the must-have requirements?\nQ: What are the nice-to-haves?\nQ: What are the biggest green flags?\nQ: What are the red flags or dealbreakers?\nQ: When comparing candidates, what will make you choose one over another?\nQ: What would make you say: "this is the one"?\n\n4. Success Metrics\nQ: What does success look like in the first 30 / 60 / 90 days?\nQ: What KPIs or outcomes define success?\nQ: What would make this hire a big win for you?\n\n5. Team Structure & Context\nQ: Who will this person report to?\nQ: Who will they work closely with?\nQ: How is the team structured today?\nQ: Will this person interact with other teams? If so, which ones and with whom?\n\n6. Hiring Process & Urgency\nQ: How urgent is this hire (1–10)?\nQ: What happens if this role isn\'t filled in the next 30 days?\nQ: Who is involved in the interview process?\nQ: Are you available to review and interview candidates within a week?\nQ: In past hires, where has the process slowed down?\nQ: Anything we should proactively avoid?\n\n7. Candidate Selling Points\nQ: Why would a strong candidate choose your company?\nQ: What makes this role exciting or unique?\nQ: What growth opportunities can we highlight?\n\n8. Batch 0 Alignment (If applicable)\nAM: "We\'ve prepared a few sample candidates to align on profile."\nQ: What do you like / dislike about these profiles?\nQ: What would you want to see differently?\n\n9. Time Off Policy\nQ: Do you have an existing PTO policy?\nIf not, introduce standard policy:\n25 days per year (vacation, holidays, sick leave)\nAccrued monthly\nUp to 3 unaccrued days\nAdditional days unpaid\nResets annually\n\n10. Payment Method\nQ: Preferred payment method? (Credit card or ACH)\nNote:\nCredit card: +3% fee\nACH: no fee\nFirst payment via card (fee waived during ACH setup)\n\n11. Growth & Future Hiring (Soft Discovery)\n(Keep this light and conversational—this is where upsell insight comes from)\nQ: How is your team expected to grow in the next 6–12 months?\nQ: Are there any additional roles you\'re considering soon?\nQ: Where do you feel the biggest gaps are today outside of this role?\n\n12. Next Steps & Alignment\nQ: Can we schedule the Candidate Review Session (CRS) for 5–7 business days after contract + deposit?\nAM (close):\n"Based on everything we discussed, we\'ll target candidates with [X profile]. Does that feel aligned?"\n';
 }
 
-async function ensureKocDoc(drive, docs, parentId, docName, companyName) {
+function buildClientNotesTemplate(companyName) {
+  return 'Client Notes \u2013 Ongoing\n\nClient Snapshot\nCompany name: ' + companyName + '\nClient Owner:\nMain Products/Services:\nCompany Size:\nFunding/Stage:\n\nHires:\n\nTalent Name | Role | Start Date | End Date | Reason for lost (if lost)\n\n\n\nHiring Preferences\nNon-Negotiables:\nDeal Breakers:\nWhat They Usually Like:\nWhat They Usually Reject:\nLocations:\nEnglish Level:\nPTO Policy:\n\nTime zone and schedule (if more than 1, specify):\n\nPOCs\n\nName | Role | Contact Details\n\n\n\nSpecial Agreements (MSA, charges, hourly rates, etc.)\n\nRisks and Issues Log\nIssue:\nImpact:\nAction being taken:\nOwner: (AM / SCP / HR / Client / Finance)\n\nUpsell Opportunities (Log anything potentially upsell + date)\n\n\nAccount Strategy\nWhere we can grow this account:\nTeams we don\'t support yet:\nExpansion ideas:\nTiming (now vs later):\n\nAny extra notes:\n';
+}
+
+async function ensureGoogleDoc(drive, docs, parentId, docName, templateText) {
   const res = await drive.files.list({
     q: `name='${docName.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false`,
     fields: 'files(id)',
@@ -93,27 +97,19 @@ async function ensureKocDoc(drive, docs, parentId, docName, companyName) {
   if (res.data.files.length > 0) {
     docId = res.data.files[0].id;
 
-    // Check if the doc is empty (blank docs have body endIndex <= 2)
     const docContent = await docs.documents.get({ documentId: docId });
     const lastIndex = docContent.data.body?.content?.slice(-1)?.[0]?.endIndex || 1;
     if (lastIndex > 2) return 'exists';
 
-    // Doc exists but is empty — populate it
     await docs.documents.batchUpdate({
       documentId: docId,
       requestBody: {
-        requests: [{
-          insertText: {
-            location: { index: 1 },
-            text: buildKocTemplate(companyName),
-          },
-        }],
+        requests: [{ insertText: { location: { index: 1 }, text: templateText } }],
       },
     });
     return 'populated';
   }
 
-  // Create new doc
   const created = await drive.files.create({
     requestBody: {
       name: docName,
@@ -129,12 +125,7 @@ async function ensureKocDoc(drive, docs, parentId, docName, companyName) {
   await docs.documents.batchUpdate({
     documentId: docId,
     requestBody: {
-      requests: [{
-        insertText: {
-          location: { index: 1 },
-          text: buildKocTemplate(companyName),
-        },
-      }],
+      requests: [{ insertText: { location: { index: 1 }, text: templateText } }],
     },
   });
 
@@ -180,15 +171,27 @@ async function main() {
 
           const companyName = extractCompanyName(folder.name);
 
-          // KOC doc goes directly in Client Ops
+          // KOC doc in Client Ops
           const kocDocName = `${companyName} - KOC - [Position]`;
           try {
-            const kocStatus = await ensureKocDoc(drive, docs, clientOpsFolderId, kocDocName, companyName);
+            const kocStatus = await ensureGoogleDoc(drive, docs, clientOpsFolderId, kocDocName, buildKocTemplate(companyName));
             if (kocStatus === 'created')        { console.log(`  [${folder.name}] created doc "${kocDocName}"`);   created++; }
             else if (kocStatus === 'populated') { console.log(`  [${folder.name}] populated doc "${kocDocName}"`); created++; }
             else { skipped++; }
           } catch (err) {
             console.error(`  [${folder.name}] ERROR with doc "${kocDocName}": ${err.message}`);
+            errors++;
+          }
+
+          // Client Notes – Ongoing doc in Client Ops
+          const clientNotesDocName = `${companyName} - Client Notes - Ongoing`;
+          try {
+            const notesStatus = await ensureGoogleDoc(drive, docs, clientOpsFolderId, clientNotesDocName, buildClientNotesTemplate(companyName));
+            if (notesStatus === 'created')        { console.log(`  [${folder.name}] created doc "${clientNotesDocName}"`);   created++; }
+            else if (notesStatus === 'populated') { console.log(`  [${folder.name}] populated doc "${clientNotesDocName}"`); created++; }
+            else { skipped++; }
+          } catch (err) {
+            console.error(`  [${folder.name}] ERROR with doc "${clientNotesDocName}": ${err.message}`);
             errors++;
           }
 
