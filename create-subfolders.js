@@ -5,7 +5,7 @@ const DRIVE_PARENT_FOLDER_ID = '1Zvl6h5QhlbcjBn3RoEamjFWqXDnjQ23Z';
 const SUBFOLDERS = ['Agreements', 'Client Ops'];
 const CLIENT_NOTES_TEMPLATE_ID = '13zjP7d1rvPBpe5z4upTfEJ8xE8bFbDlP8UK9p8-uOPA';
 const RECREATE_CLIENT_NOTES = false;
-const CLEANUP_OLD_DOCS = true;
+const CLEANUP_OLD_DOCS = false;
 
 async function getClients() {
   const credentials = JSON.parse(process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT);
