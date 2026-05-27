@@ -4,9 +4,6 @@ const { google } = require('googleapis');
 const DRIVE_PARENT_FOLDER_ID = '1Zvl6h5QhlbcjBn3RoEamjFWqXDnjQ23Z';
 const SUBFOLDERS = ['Agreements', 'Client Ops'];
 const CLIENT_NOTES_TEMPLATE_ID = '13zjP7d1rvPBpe5z4upTfEJ8xE8bFbDlP8UK9p8-uOPA';
-
-// Set to true to delete and recreate all existing Client Notes docs from the new template.
-// Set to false after the one-time migration so existing docs are never overwritten.
 const RECREATE_CLIENT_NOTES = true;
 
 async function getClients() {
@@ -142,8 +139,13 @@ async function ensureClientNotesDoc(drive, docs, parentId, docName, companyName)
 
   if (res.data.files.length > 0) {
     if (!RECREATE_CLIENT_NOTES) return 'exists';
-    // Delete the old doc so we can recreate from the new template
-    await drive.files.delete({ fileId: res.data.files[0].id, supportsAllDrives: true });
+
+    // Rename old doc instead of deleting (service account can rename but not delete in shared drives)
+    await drive.files.update({
+      fileId: res.data.files[0].id,
+      requestBody: { name: docName + ' (OLD)' },
+      supportsAllDrives: true,
+    });
   }
 
   const copied = await drive.files.copy({
