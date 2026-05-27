@@ -4,7 +4,8 @@ const { google } = require('googleapis');
 const DRIVE_PARENT_FOLDER_ID = '1Zvl6h5QhlbcjBn3RoEamjFWqXDnjQ23Z';
 const SUBFOLDERS = ['Agreements', 'Client Ops'];
 const CLIENT_NOTES_TEMPLATE_ID = '13zjP7d1rvPBpe5z4upTfEJ8xE8bFbDlP8UK9p8-uOPA';
-const RECREATE_CLIENT_NOTES = true;
+const RECREATE_CLIENT_NOTES = false;
+const CLEANUP_OLD_DOCS = true;
 
 async function getClients() {
   const credentials = JSON.parse(process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT);
@@ -130,8 +131,29 @@ async function ensureGoogleDoc(drive, docs, parentId, docName, templateText) {
 }
 
 async function ensureClientNotesDoc(drive, docs, parentId, docName, companyName) {
+  const safeName = docName.replace(/'/g, "\\'");
+
+  // Trash any leftover (OLD) docs from previous migration
+  if (CLEANUP_OLD_DOCS) {
+    const oldName = safeName + ' (OLD)';
+    const oldRes = await drive.files.list({
+      q: `name='${oldName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false`,
+      fields: 'files(id)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    for (const f of oldRes.data.files || []) {
+      await drive.files.update({
+        fileId: f.id,
+        requestBody: { trashed: true },
+        supportsAllDrives: true,
+      });
+    }
+  }
+
+  // Check if the current doc already exists
   const res = await drive.files.list({
-    q: `name='${docName.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false`,
+    q: `name='${safeName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false`,
     fields: 'files(id)',
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
@@ -139,8 +161,6 @@ async function ensureClientNotesDoc(drive, docs, parentId, docName, companyName)
 
   if (res.data.files.length > 0) {
     if (!RECREATE_CLIENT_NOTES) return 'exists';
-
-    // Rename old doc instead of deleting (service account can rename but not delete in shared drives)
     await drive.files.update({
       fileId: res.data.files[0].id,
       requestBody: { name: docName + ' (OLD)' },
@@ -150,10 +170,7 @@ async function ensureClientNotesDoc(drive, docs, parentId, docName, companyName)
 
   const copied = await drive.files.copy({
     fileId: CLIENT_NOTES_TEMPLATE_ID,
-    requestBody: {
-      name: docName,
-      parents: [parentId],
-    },
+    requestBody: { name: docName, parents: [parentId] },
     fields: 'id',
     supportsAllDrives: true,
   });
@@ -224,7 +241,7 @@ async function main() {
             errors++;
           }
 
-          // Client Notes – Ongoing doc in Client Ops (copied from template)
+          // Client Notes – Ongoing doc in Client Ops
           const clientNotesDocName = `${companyName} - Client Notes - Ongoing`;
           try {
             const notesStatus = await ensureClientNotesDoc(drive, docs, clientOpsFolderId, clientNotesDocName, companyName);
