@@ -41,10 +41,9 @@ npm start
 
 ### GitHub secrets required
 
-Go to **Settings → Secrets and variables → Actions → New repository secret** and add all three:
+Go to **Settings → Secrets and variables → Actions → New repository secret** and add:
 
 | Secret name | Value |
 |---|---|
 | `HUBSPOT_API_KEY` | Your HubSpot Private App token |
-| `ASANA_API_KEY` | Your Asana Personal Access Token (found at app.asana.com → Profile → My Settings → Apps → Personal access tokens) |
-| `ASANA_PROJECT_ID` | `1214241148472876` |
+| `GOOGLE_DRIVE_SERVICE_ACCOUNT` | Service-account JSON (optional — used to create a Drive folder per company) |
