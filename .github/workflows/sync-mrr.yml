@@ -25,7 +25,5 @@ jobs:
       - name: Run sync script
         env:
           HUBSPOT_API_KEY: ${{ secrets.HUBSPOT_API_KEY }}
-          ASANA_API_KEY: ${{ secrets.ASANA_API_KEY }}
-          ASANA_PROJECT_ID: ${{ secrets.ASANA_PROJECT_ID }}
           GOOGLE_DRIVE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_DRIVE_SERVICE_ACCOUNT }}
         run: node sync.js
